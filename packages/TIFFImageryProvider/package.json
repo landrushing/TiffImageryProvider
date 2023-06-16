@@ -44,7 +44,7 @@
     "@rollup/plugin-typescript": "^11.0.0",
     "@types/offscreencanvas": "^2019.7.0",
     "@types/proj4": "^2.5.2",
-    "cesium": "^1.99.0",
+    "cesium": "^1.106.1",
     "geotiff-geokeys-to-proj4": "^2022.9.7",
     "proj4": "^2.9.0",
     "rollup": "^3.12.0",

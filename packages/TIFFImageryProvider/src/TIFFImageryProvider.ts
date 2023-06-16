@@ -7,8 +7,18 @@ import {
   ImageryLayerFeatureInfo,
   Math as CMath,
   DeveloperError,
+  TextureMinificationFilter,
+  TextureMagnificationFilter,
+  TileDiscardPolicy,
+  Proxy,
+  ImageryTypes,
 } from 'cesium'
-import GeoTIFF, { Pool, fromUrl as tiffFromUrl, GeoTIFFImage } from 'geotiff'
+import GeoTIFF, {
+  Pool,
+  fromUrl as tiffFromUrl,
+  fromBlob as tiffFromBlob,
+  GeoTIFFImage,
+} from 'geotiff'
 
 import { addColorScale, plot } from './plotty'
 import WorkerFarm from './worker-farm'
@@ -109,7 +119,22 @@ export type TIFFImageryProviderRenderOptions = {
 }
 
 export interface TIFFImageryProviderOptions {
-  url: string
+  // url: string
+  source: GeoTIFF
+  image: GeoTIFFImage
+  imageCount: number
+
+  cogLevels: number[]
+  readSamples: number[]
+  bands: Record<
+    number,
+    {
+      min: number
+      max: number
+    }
+  >
+  pool: Pool
+
   credit?: string
   tileSize?: number
   maximumLevel?: number
@@ -138,6 +163,19 @@ function getWorkerPool() {
 }
 
 export class TIFFImageryProvider {
+  defaultAlpha: number | undefined
+  defaultNightAlpha: number | undefined
+  defaultDayAlpha: number | undefined
+  defaultBrightness: number | undefined
+  defaultContrast: number | undefined
+  defaultHue: number | undefined
+  defaultSaturation: number | undefined
+  defaultGamma: number | undefined
+  defaultMinificationFilter: TextureMinificationFilter
+  defaultMagnificationFilter: TextureMagnificationFilter
+  readonly tileDiscardPolicy: TileDiscardPolicy
+  readonly proxy: Proxy
+
   ready: boolean
   tilingScheme: GeographicTilingScheme
   rectangle: Rectangle
@@ -148,7 +186,7 @@ export class TIFFImageryProvider {
   minimumLevel: number
   credit: Credit
   private _error: Event
-  readyPromise: Promise<void>
+  readyPromise: Promise<boolean>
   private _destroyed = false
   _source!: GeoTIFF
   private _imageCount!: number
@@ -157,7 +195,7 @@ export class TIFFImageryProvider {
     string,
     {
       time: number
-      data: ImageData | HTMLCanvasElement | HTMLImageElement
+      data: ImageryTypes //ImageData | HTMLCanvasElement | HTMLImageElement
     }
   > = {}
   bands: Record<
@@ -187,234 +225,146 @@ export class TIFFImageryProvider {
     this._workerFarm = new WorkerFarm()
     this._cacheTime = options.cache ?? 60 * 1000
 
-    this.readyPromise = tiffFromUrl(options.url, {
-      allowFullFile: true,
-    }).then(async (res) => {
-      this._pool = getWorkerPool()
-      this._source = res
-      const image = await res.getImage()
+    this._pool = options.pool
+    this._source = options.source
+    const image = options.image
 
-      this._imageCount = await res.getImageCount()
-      this.tileSize = this.tileWidth =
-        options.tileSize || image.getTileWidth() || 512
-      this.tileHeight = options.tileSize || image.getTileHeight() || 512
-      // 获取合适的COG层级
-      this.cogLevels = await this._getCogLevels()
+    this._imageCount = options.imageCount
+    this.tileSize = this.tileWidth =
+      options.tileSize || image.getTileWidth() || 512
+    this.tileHeight = options.tileSize || image.getTileHeight() || 512
 
-      // 获取波段数
-      const samples = image.getSamplesPerPixel()
-      this.renderOptions = options.renderOptions ?? {}
-      // 获取nodata值
-      const noData = image.getGDALNoData()
-      this.noData = this.renderOptions.nodata ?? noData
+    // 获取合适的COG层级
+    this.cogLevels = options.cogLevels
 
-      // 赋初值
-      if (samples < 3 && this.renderOptions.convertToRGB) {
-        const error = new DeveloperError(
-          'Can not render the image as RGB, please check the convertToRGB parameter'
-        )
-        throw error
-      }
-      if (
-        !this.renderOptions.single &&
-        !this.renderOptions.multi &&
-        !this.renderOptions.convertToRGB
-      ) {
-        if (samples > 1) {
-          this.renderOptions = {
-            convertToRGB: true,
-            ...this.renderOptions,
-          }
-        } else {
-          this.renderOptions = {
-            single: {
-              band: 1,
-            },
-            ...this.renderOptions,
-          }
+    // 获取波段数
+    const samples = image.getSamplesPerPixel()
+    this.renderOptions = options.renderOptions ?? {}
+    // 获取nodata值
+    const noData = image.getGDALNoData()
+    this.noData = this.renderOptions.nodata ?? noData
+
+    // 赋初值
+    if (samples < 3 && this.renderOptions.convertToRGB) {
+      const error = new DeveloperError(
+        'Can not render the image as RGB, please check the convertToRGB parameter'
+      )
+      throw error
+    }
+    if (
+      !this.renderOptions.single &&
+      !this.renderOptions.multi &&
+      !this.renderOptions.convertToRGB
+    ) {
+      if (samples > 1) {
+        this.renderOptions = {
+          convertToRGB: true,
+          ...this.renderOptions,
+        }
+      } else {
+        this.renderOptions = {
+          single: {
+            band: 1,
+          },
+          ...this.renderOptions,
         }
       }
-      if (this.renderOptions.single) {
-        this.renderOptions.single.band = this.renderOptions.single.band ?? 1
-      }
+    }
+    if (this.renderOptions.single) {
+      this.renderOptions.single.band = this.renderOptions.single.band ?? 1
+    }
 
-      const { single, multi, convertToRGB } = this.renderOptions
-      this.readSamples = multi
-        ? [multi.r.band - 1, multi.g.band - 1, multi.b.band - 1]
-        : convertToRGB
-        ? [0, 1, 2]
-        : [0]
-      if (single?.expression) {
-        this.readSamples = findAndSortBandNumbers(single.expression)
-      }
+    const { single } = this.renderOptions
+    this.readSamples = options.readSamples
+    this.bands = options.bands
 
-      // 获取波段最大最小值信息
-      const bands: Record<
-        number,
-        {
-          min: number
-          max: number
-        }
-      > = {}
-      await Promise.all(
-        this.readSamples.map(async (i) => {
-          const element = image.getGDALMetadata(i)
-          const bandNum = i + 1
+    // 获取空间范围
+    const bbox = image.getBoundingBox()
+    const [west, south, east, north] = bbox
 
-          if (element?.STATISTICS_MINIMUM && element?.STATISTICS_MAXIMUM) {
-            bands[bandNum] = {
-              min: +element.STATISTICS_MINIMUM,
-              max: +element.STATISTICS_MAXIMUM,
-            }
-          } else {
-            if (convertToRGB) {
-              bands[bandNum] = {
-                min: 0,
-                max: 255,
-              }
-            }
-
-            if (multi) {
-              const inputBand =
-                multi[
-                  Object.keys(multi).find((key) => multi[key]?.band === bandNum)
-                ]
-              if (
-                inputBand?.min !== undefined &&
-                inputBand?.max !== undefined
-              ) {
-                const { min, max } = inputBand
-                bands[bandNum] = {
-                  min,
-                  max,
-                }
-              }
-            }
-
-            if (
-              single &&
-              !single.expression &&
-              single.band === bandNum &&
-              single.domain
-            ) {
-              bands[bandNum] = {
-                min: single.domain[0],
-                max: single.domain[1],
-              }
-            }
-
-            if (!single?.expression && !bands[bandNum]) {
-              // 尝试获取波段最大最小值
-              console.warn(
-                `Can not get band${bandNum} min/max, try to calculate min/max values, or setting ${
-                  single ? 'domain' : 'min / max'
-                }`
-              )
-
-              const previewImage = await res.getImage(this.cogLevels[0])
-              const data = (
-                (await previewImage.readRasters({
-                  samples: [i],
-                  pool: this._pool,
-                })) as unknown as number[][]
-              )[0].filter((item: any) => !isNaN(item))
-              bands[bandNum] = getMinMax(data, noData)
-            }
-          }
-        })
+    const prjCode = +(
+      image.geoKeys.ProjectedCSTypeGeoKey ?? image.geoKeys.GeographicTypeGeoKey
+    )
+    const { projFunc } = options
+    const proj = projFunc?.(prjCode)
+    if (typeof proj === 'function') {
+      const leftBottom = proj([west, south])
+      const rightTop = proj([east, north])
+      this.rectangle = Rectangle.fromDegrees(
+        leftBottom[0],
+        leftBottom[1],
+        rightTop[0],
+        rightTop[1]
       )
-      this.bands = bands
-
-      // 获取空间范围
-      const bbox = image.getBoundingBox()
-      const [west, south, east, north] = bbox
-
-      const prjCode = +(
-        image.geoKeys.ProjectedCSTypeGeoKey ??
-        image.geoKeys.GeographicTypeGeoKey
-      )
-      const { projFunc } = options
-      const proj = projFunc?.(prjCode)
-      if (typeof proj === 'function') {
-        const leftBottom = proj([west, south])
-        const rightTop = proj([east, north])
+    } else if (prjCode === 4326) {
+      this.rectangle = Rectangle.fromDegrees(...bbox)
+    } else {
+      try {
+        const projObj = geokeysToProj4.toProj4(image.geoKeys) // Convert geokeys to proj4 string
+        // The function above returns an object where proj4 property is a Proj4 string and coordinatesConversionParameters is conversion parameters which we'll use later
+        const project = proj4(projObj.proj4, 'WGS84').forward // Project our GeoTIFF to WGS84
+        if (Object.keys(projObj.errors).length > 0) console.warn(projObj.errors)
+        const leftBottom = project([west, south])
+        const rightTop = project([east, north])
         this.rectangle = Rectangle.fromDegrees(
           leftBottom[0],
           leftBottom[1],
           rightTop[0],
           rightTop[1]
         )
-      } else if (prjCode === 4326) {
-        this.rectangle = Rectangle.fromDegrees(...bbox)
-      } else {
-        try {
-          const projObj = geokeysToProj4.toProj4(image.geoKeys) // Convert geokeys to proj4 string
-          // The function above returns an object where proj4 property is a Proj4 string and coordinatesConversionParameters is conversion parameters which we'll use later
-          const project = proj4(projObj.proj4, 'WGS84').forward // Project our GeoTIFF to WGS84
-          if (Object.keys(projObj.errors).length > 0)
-            console.warn(projObj.errors)
-          const leftBottom = project([west, south])
-          const rightTop = project([east, north])
-          this.rectangle = Rectangle.fromDegrees(
-            leftBottom[0],
-            leftBottom[1],
-            rightTop[0],
-            rightTop[1]
-          )
-        } catch (error) {
-          console.warn(`Unspported projection type: EPSG:${prjCode}`, error)
-          throw new DeveloperError(
-            `Unspported projection type: EPSG:${prjCode}, please add projFunc parameter to handle projection`
-          )
-        }
+      } catch (error) {
+        console.warn(`Unspported projection type: EPSG:${prjCode}`, error)
+        throw new DeveloperError(
+          `Unspported projection type: EPSG:${prjCode}, please add projFunc parameter to handle projection`
+        )
       }
+    }
 
-      // 处理跨180度经线的情况
-      // https://github.com/CesiumGS/cesium/blob/da00d26473f663db180cacd8e662ca4309e09560/packages/engine/Source/Core/TileAvailability.js#L195
-      if (this.rectangle.east < this.rectangle.west) {
-        this.rectangle.east += CMath.TWO_PI
-      }
-      this.tilingScheme = new GeographicTilingScheme({
-        rectangle: this.rectangle,
-        numberOfLevelZeroTilesX: 1,
-        numberOfLevelZeroTilesY: 1,
-      })
-      const maxCogLevel = this.cogLevels.length - 1
-      this.maximumLevel =
-        this.maximumLevel > maxCogLevel ? maxCogLevel : this.maximumLevel
-      this._images = new Array(this._imageCount).fill(null)
-
-      // 如果是单通道渲染, 则构建plot对象
-      try {
-        if (this.renderOptions.single) {
-          const band = this.bands[single.band]
-          if (!single.expression && !band) {
-            throw new DeveloperError(`Invalid band${single.band}`)
-          }
-          this.plot = new plot({
-            canvas,
-            ...single,
-            domain: single.domain ?? [band.min, band.max],
-          })
-          this.plot.setNoDataValue(this.noData)
-
-          const { expression, colors } = single
-          this.plot.setExpression(expression)
-          if (colors) {
-            const colorScale = generateColorScale(colors)
-            addColorScale('temp', colorScale.colors, colorScale.positions)
-            this.plot.setColorScale('temp' as any)
-          } else {
-            this.plot.setColorScale(single?.colorScale ?? 'blackwhite')
-          }
-        }
-      } catch (e) {
-        console.error(e)
-        this._error.raiseEvent(e)
-      }
-
-      this.ready = true
+    // 处理跨180度经线的情况
+    // https://github.com/CesiumGS/cesium/blob/da00d26473f663db180cacd8e662ca4309e09560/packages/engine/Source/Core/TileAvailability.js#L195
+    if (this.rectangle.east < this.rectangle.west) {
+      this.rectangle.east += CMath.TWO_PI
+    }
+    this.tilingScheme = new GeographicTilingScheme({
+      rectangle: this.rectangle,
+      numberOfLevelZeroTilesX: 1,
+      numberOfLevelZeroTilesY: 1,
     })
+    const maxCogLevel = this.cogLevels.length - 1
+    this.maximumLevel =
+      this.maximumLevel > maxCogLevel ? maxCogLevel : this.maximumLevel
+    this._images = new Array(this._imageCount).fill(null)
+
+    // 如果是单通道渲染, 则构建plot对象
+    try {
+      if (this.renderOptions.single) {
+        const band = this.bands[single.band]
+        if (!single.expression && !band) {
+          throw new DeveloperError(`Invalid band${single.band}`)
+        }
+        this.plot = new plot({
+          canvas,
+          ...single,
+          domain: single.domain ?? [band.min, band.max],
+        })
+        this.plot.setNoDataValue(this.noData)
+
+        const { expression, colors } = single
+        this.plot.setExpression(expression)
+        if (colors) {
+          const colorScale = generateColorScale(colors)
+          addColorScale('temp', colorScale.colors, colorScale.positions)
+          this.plot.setColorScale('temp' as any)
+        } else {
+          this.plot.setColorScale(single?.colorScale ?? 'blackwhite')
+        }
+      }
+    } catch (e) {
+      console.error(e)
+      this._error.raiseEvent(e)
+    }
+
+    this.ready = true
   }
 
   /**
@@ -428,39 +378,6 @@ export class TIFFImageryProvider {
 
   get isDestroyed() {
     return this._destroyed
-  }
-
-  /**
-   * get suitable cog levels
-   */
-  private async _getCogLevels() {
-    const levels: number[] = []
-    let maximumLevel: number = this._imageCount - 1
-    for (let i = this._imageCount - 1; i >= 0; i--) {
-      const image = (this._images[i] = await this._source.getImage(i))
-      const width = image.getWidth()
-      const height = image.getHeight()
-      const size = Math.max(width, height)
-
-      // 如果第一张瓦片的image tileSize大于512，则顺位后延，以减少请求量
-      if (i === this._imageCount - 1) {
-        const firstImageLevel = Math.ceil(
-          (size - this.tileSize) / this.tileSize
-        )
-        levels.push(...new Array(firstImageLevel).fill(i))
-      }
-
-      // add 50% tilewidth tolerance
-      if (size > this.tileSize * 0.5) {
-        maximumLevel = i
-        break
-      }
-    }
-    let nowCogLevel: number = maximumLevel
-    while (nowCogLevel >= 0) {
-      levels.push(nowCogLevel--)
-    }
-    return levels
   }
 
   /**
@@ -518,7 +435,7 @@ export class TIFFImageryProvider {
     }
   }
 
-  async requestImage(x: number, y: number, z: number) {
+  async requestImage(x: number, y: number, z: number): Promise<ImageryTypes> {
     if (!this.ready) {
       throw new DeveloperError(
         'requestImage must not be called before the imagery provider is ready.'
@@ -537,7 +454,7 @@ export class TIFFImageryProvider {
         return undefined
       }
 
-      let result: ImageData | HTMLImageElement
+      let result: ImageryTypes //ImageData | HTMLImageElement
 
       if (multi || convertToRGB) {
         const opts = {
@@ -677,6 +594,218 @@ export class TIFFImageryProvider {
     this.plot?.destroy()
     this._destroyed = true
   }
+
+  getTileCredits(x: number, y: number, level: number) {
+    return [this.credit]
+  }
 }
 
 export default TIFFImageryProvider
+export const TiffImageryProvider = { fromUrl, fromBlob }
+
+export async function fromUrl(
+  url: string,
+  renderOptions: TIFFImageryProviderRenderOptions = {}
+) {
+  try {
+    const source = await tiffFromUrl(url, {
+      allowFullFile: true,
+    })
+    return fromGeoTIFF(source, renderOptions)
+  } catch (e) {
+    console.error(e)
+    throw new Error(`Error creating GeoTIFF from ${url}: ${e.message}`)
+  }
+}
+
+export async function fromBlob(
+  blob: Blob,
+  renderOptions: TIFFImageryProviderRenderOptions = {}
+) {
+  try {
+    const source = await tiffFromBlob(blob)
+    return fromGeoTIFF(source, renderOptions)
+  } catch (e) {
+    console.error(e)
+    throw new Error(`Error creating GeoTIFF from Blob: ${e.message}`)
+  }
+}
+
+async function fromGeoTIFF(
+  source: GeoTIFF,
+  renderOptions: TIFFImageryProviderRenderOptions
+) {
+  try {
+    const image = await source.getImage()
+    const imageCount = await source.getImageCount()
+
+    const cogLevels = await getCogLevels({
+      source,
+      imageCount,
+      tileSize: image.getTileWidth() || 512,
+    })
+
+    const pool = getWorkerPool()
+    const readSamples = getReadSamples({ renderOptions })
+    const bands = await getBandValues({
+      source,
+      image,
+      readSamples,
+      cogLevels,
+      renderOptions,
+      pool,
+    })
+    const provider = new TIFFImageryProvider({
+      source,
+      image,
+      imageCount,
+      bands,
+      readSamples,
+      cogLevels,
+      pool,
+      renderOptions,
+    })
+    return provider
+  } catch (e) {
+    // console.error(e)
+    throw new Error(`Error creating ImageryProvider from GeoTIFF: ${e.message}`)
+  }
+}
+
+type getCogLevels = { source: GeoTIFF; imageCount: number; tileSize: number }
+async function getCogLevels({ source, imageCount, tileSize }: getCogLevels) {
+  const levels: number[] = []
+  let maximumLevel: number = imageCount - 1
+  for (let i = imageCount - 1; i >= 0; i--) {
+    const image = await source.getImage(i)
+    const width = image.getWidth()
+    const height = image.getHeight()
+    const size = Math.max(width, height)
+
+    // 如果第一张瓦片的image tileSize大于512，则顺位后延，以减少请求量
+    if (i === imageCount - 1) {
+      const firstImageLevel = Math.ceil((size - tileSize) / tileSize)
+      levels.push(...new Array(firstImageLevel).fill(i))
+    }
+
+    // add 50% tilewidth tolerance
+    if (size > tileSize * 0.5) {
+      maximumLevel = i
+      break
+    }
+  }
+  let nowCogLevel: number = maximumLevel
+  while (nowCogLevel >= 0) {
+    levels.push(nowCogLevel--)
+  }
+  return levels
+}
+
+type getReadSamples = { renderOptions: TIFFImageryProviderRenderOptions }
+function getReadSamples({
+  renderOptions: { multi, convertToRGB, single },
+}: getReadSamples) {
+  let readSamples = multi
+    ? [multi.r.band - 1, multi.g.band - 1, multi.b.band - 1]
+    : convertToRGB
+    ? [0, 1, 2]
+    : [0]
+  if (single?.expression) {
+    readSamples = findAndSortBandNumbers(single.expression)
+  }
+  return readSamples
+}
+
+type getBandValues = {
+  renderOptions: TIFFImageryProviderRenderOptions
+  readSamples: number[]
+  source: GeoTIFF
+  image: GeoTIFFImage
+  cogLevels: number[]
+  pool: Pool
+}
+async function getBandValues({
+  renderOptions: { convertToRGB, single, multi, nodata },
+  readSamples,
+  source,
+  image,
+  cogLevels,
+  pool,
+}: getBandValues) {
+  const bands: Record<
+    number,
+    {
+      min: number
+      max: number
+    }
+  > = {}
+  await Promise.all(
+    readSamples.map(async (i) => {
+      const element = image.getGDALMetadata(i)
+      const bandNum = i + 1
+
+      if (element?.STATISTICS_MINIMUM && element?.STATISTICS_MAXIMUM) {
+        bands[bandNum] = {
+          min: +element.STATISTICS_MINIMUM,
+          max: +element.STATISTICS_MAXIMUM,
+        }
+      } else {
+        if (convertToRGB) {
+          bands[bandNum] = {
+            min: 0,
+            max: 255,
+          }
+        }
+
+        if (multi) {
+          const inputBand =
+            multi[
+              Object.keys(multi).find((key) => multi[key]?.band === bandNum)
+            ]
+          if (inputBand?.min !== undefined && inputBand?.max !== undefined) {
+            const { min, max } = inputBand
+            bands[bandNum] = {
+              min,
+              max,
+            }
+          }
+        }
+
+        if (
+          single &&
+          !single.expression &&
+          single.band === bandNum &&
+          single.domain
+        ) {
+          bands[bandNum] = {
+            min: single.domain[0],
+            max: single.domain[1],
+          }
+        }
+
+        if (!single?.expression && !bands[bandNum]) {
+          // 尝试获取波段最大最小值
+          console.warn(
+            `Can not get band${bandNum} min/max, try to calculate min/max values, or setting ${
+              single ? 'domain' : 'min / max'
+            }`
+          )
+
+          const previewImage = await source.getImage(cogLevels[0])
+          console.log(
+            `[DEBUG] getBandValues ${i}:`,
+            await previewImage.readRasters({ samples: [i], pool })
+          )
+          const data = (
+            (await previewImage.readRasters({
+              samples: [i],
+              pool,
+            })) as unknown as number[][]
+          )[0].filter((item: any) => !isNaN(item))
+          bands[bandNum] = getMinMax(data, nodata ?? image.getGDALNoData())
+        }
+      }
+    })
+  )
+  return bands
+}

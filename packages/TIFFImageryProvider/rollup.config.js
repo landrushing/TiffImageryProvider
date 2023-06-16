@@ -1,12 +1,12 @@
-import resolve from '@rollup/plugin-node-resolve';
-import commonjs from '@rollup/plugin-commonjs';
-import typescript from '@rollup/plugin-typescript';
-import webWorkerLoader from "rollup-plugin-web-worker-loader";
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
-const pkg = require("./package.json")
+import resolve from '@rollup/plugin-node-resolve'
+import commonjs from '@rollup/plugin-commonjs'
+import typescript from '@rollup/plugin-typescript'
+import webWorkerLoader from 'rollup-plugin-web-worker-loader'
+import { createRequire } from 'module'
+const require = createRequire(import.meta.url)
+const pkg = require('./package.json')
 
-const deps = { ...pkg.dependencies, ...pkg.peerDependencies };
+const deps = { ...pkg.dependencies, ...pkg.peerDependencies }
 /**
  * @type {import('rollup').RollupOptions}
  */
@@ -15,7 +15,7 @@ const config = {
   output: {
     file: pkg.main,
     sourcemap: true,
-    exports: "auto",
+    exports: 'auto',
   },
   external: Object.keys(deps),
   plugins: [
@@ -24,11 +24,11 @@ const config = {
     typescript(),
     webWorkerLoader({
       inline: true,
-      targetPlatform: "browser",
-      extensions: ["ts", "js"],
-      external: []
+      targetPlatform: 'browser',
+      extensions: ['ts', 'js'],
+      external: [],
     }),
-  ]
-};
+  ],
+}
 
-export default config;
+export default config
