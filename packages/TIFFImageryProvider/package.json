@@ -1,5 +1,5 @@
 {
-  "name": "tiff-imagery-provider",
+  "name": "@landrush/tiff-imagery-provider-fork",
   "type": "module",
   "version": "2.4.3",
   "description": "Load GeoTIFF/COG(Cloud optimized GeoTIFF) on Cesium",
@@ -19,7 +19,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hongfaqiu/tiff-imagery-provider.git"
+    "url": "git+https://github.com/landrushing/TiffImageryProvider.git"
   },
   "scripts": {
     "dev": "rollup -c -w",
@@ -27,6 +27,10 @@
     "prepublish": "pnpm build"
   },
   "author": "hongfaqiu",
+  "contributors": [
+    "hongfaqiu",
+    "themrcam"
+  ],
   "license": "MIT",
   "files": [
     "lib",
