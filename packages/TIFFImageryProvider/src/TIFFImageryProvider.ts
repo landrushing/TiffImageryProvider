@@ -1,4 +1,4 @@
-import { Event, GeographicTilingScheme, Credit, Rectangle, ImageryLayerFeatureInfo, Math as CesiumMath, DeveloperError, defined, Cartesian2, WebMercatorTilingScheme } from "cesium";
+import { Event, GeographicTilingScheme, Credit, Rectangle, ImageryLayerFeatureInfo, Math as CesiumMath, DeveloperError, defined, Cartesian2, WebMercatorTilingScheme, ImageryTypes, Request, RequestScheduler, RequestType, RequestState } from "cesium";
 import GeoTIFF, { Pool, fromUrl, fromBlob, GeoTIFFImage, TypedArrayArrayWithDimensions } from 'geotiff';
 
 import { addColorScale, plot } from './plotty'
@@ -9,6 +9,7 @@ import { BBox, reprojection } from "./helpers/reprojection";
 
 import { reverseArray } from "./helpers/utils";
 import { createCanavas } from "./helpers/createCanavas";
+import { defer } from './helpers/defer'
 
 
 export interface SingleBandRenderOptions {
@@ -152,6 +153,7 @@ export interface TIFFImageryProviderOptions {
 }
 
 const canvas = createCanavas(256, 256);
+let requestCount = 0
 
 export class TIFFImageryProvider {
   ready: boolean;
@@ -196,6 +198,7 @@ export class TIFFImageryProvider {
   geotiffWorkerPool: Pool;
   private _buffer: number = 1;
   private _rgbPlot: plot;
+  private _url: string
 
   constructor(private readonly options: TIFFImageryProviderOptions & {
     /**
@@ -227,6 +230,7 @@ export class TIFFImageryProvider {
   }
 
   private async _build(url: string | File | Blob, options: TIFFImageryProviderOptions = {}) {
+    this._url = typeof url === 'string' ? url : URL.createObjectURL(url);
     const { tileSize, renderOptions, projFunc, requestOptions } = options;
     let source = await (url instanceof File || url instanceof Blob ? fromBlob(url) : fromUrl(url, requestOptions))
     let image = await source.getImage();
@@ -665,7 +669,7 @@ export class TIFFImageryProvider {
     }
   }
 
-  async requestImage(x: number, y: number, z: number) {
+  requestImage(x: number, y: number, z: number, request: Request): Promise<ImageryTypes | OffscreenCanvas | ImageData> | undefined {
     if (!this.ready) {
       throw new DeveloperError(
         "requestImage must not be called before the imagery provider is ready."
@@ -673,8 +677,99 @@ export class TIFFImageryProvider {
     }
     if (z < this.minimumLevel || z > this.maximumLevel) return undefined;
 
+    const deferred = defer<void>()
+    // the request param can fit this form, except that throttle (readonly) is false
+    // const fauxRequest = new Request({ 
+      // url: this._url,
+      // throttle: true,
+      // throttleByServer: true,
+      // requestFunction: () => {
+        // // we don't want _requestImage here because we want to cache ourselves,
+        // // so we don't want Cesium cancelling this function
+        // // image = this._requestImage(x,y,z,deferred)
+        // return deferred.promise
+      // },
+      // cancelFunction: () => {
+        // console.log(`[DEBUG] cancelled request(${x},${y},${z})`)
+        // // I don't think this really does anything, but it feels right to put here
+        // // deferred.reject()
+        // // but maybe it's actually bad? I'm not sure...
+      // },
+      // type: RequestType.IMAGERY
+    // });
+    // console.log(`[DEBUG] fauxRequest`, fauxRequest, `param request`, _request)
+    request.url = this._url
+    request.requestFunction = () => deferred.promise
+    request.cancelFunction = () => {console.log(`[DEBUG] cancelled request(${x},${y},${z})`)}
+    // @ts-expect-error private API
+    const scheduled = RequestScheduler.request(request) as Promise<unknown> | undefined
+
+    if(!scheduled) {
+      // RequestScheduler has throttled this request, will try again later
+      console.log(`[DEBUG] throttled request(${x},${y},${z})`)
+      return undefined
+    }
+    
+    // if we haven't been throttled, go ahead with _requestImage.
+    // deferred will handle telling Cesium when we're done, and the 
+    // Promise from _requestImage will be returned here by then
+    return this._requestImage(x,y,z,deferred)
+
+    // ========== ATTEMPT GRAVEYARD ===========
+    // return deferred.promise
+      // .then(() => image)
+      // .catch((reason) => {
+        // console.log(`[DEBUG] error with scheduled request(${x},${y},${z})`, reason)
+        // return image
+      // })
+    // if(fauxRequest.state === RequestState.CANCELLED) {
+      // return undefined
+    // }
+    // return scheduled
+      // .then(() => image)
+      // .catch(async (reason) => { 
+        // if(fauxRequest.state === RequestState.CANCELLED) {
+          // // console.log(`[TIFFImageryProvider#requestImage] request(${x},${y},${z}) terminated, awaiting promise manually`)
+          // // await deferred.promise
+          // // await fauxRequest.requestFunction()
+          // console.log(`[TIFFImageryProvider#requestImage] request(${x},${y},${z}) terminated`)
+          // return image
+        // } else {
+          // console.log(`[DEBUG] error with scheduled Request(${x}, ${y}, ${z})`, reason)
+        // }
+        // // Returning a promise to undefined is not what we want.
+        // // We probably need some more checks here.
+        // return image 
+      // })
+
+    // return this._requestImage(x,y,z)
+      // .then((image) => { return image })
+      // .catch((reason) => { 
+        // console.log(`[DEBUG] error with _requestImage(${x}, ${y}, ${z})`, reason)
+        // return undefined 
+      // })
+      // .finally(() => { --requestCount })
+    // try {
+      // return this.actuallyRequestImage(x, y, z);
+    // } finally {
+      // --requestCount;
+    // }
+  }
+
+  async _requestImage(x: number, y: number, z: number, deferred?: ReturnType<typeof defer<void>>) {
+    if (!this.ready) {
+      throw new DeveloperError(
+        "_requestImage must not be called before the imagery provider is ready."
+      );
+    }
+    if (z < this.minimumLevel || z > this.maximumLevel) {
+      deferred?.reject(`Error during rendering: level ${z} beyond bounds [${this.minimumLevel}, ${this.maximumLevel}]`)
+      return undefined;
+    }
+
     const cacheKey = `${x}_${y}_${z}`;
     if (this._imagesCache.has(cacheKey)) {
+      deferred?.resolve()
       return this._imagesCache.get(cacheKey);
     }
 
@@ -684,6 +779,7 @@ export class TIFFImageryProvider {
       const { width, height, data, window } = await this._loadTile(x, y, z);
 
       if (this._destroyed || !width || !height) {
+        deferred?.reject(`Error during rendering: ${this._destroyed ? 'Destroyed' : 'Invalid _loadTile size'}`)
         return undefined;
       }
 
@@ -695,6 +791,7 @@ export class TIFFImageryProvider {
         if (multi || convertToRGB) {
           if (!this._rgbPlot) {
             console.warn('RGB plot not initialized');
+            deferred?.reject(`Error during rendering: RGB plot not initialized`)
             return undefined;
           }
           targetPlot = this._rgbPlot;
@@ -731,6 +828,7 @@ export class TIFFImageryProvider {
             targetPlot.renderDataset(`b${single.band}`, window);
           }
         } else {
+          deferred?.reject(`Error during rendering: unable to determine plot type`)
           return undefined;
         }
 
@@ -753,14 +851,17 @@ export class TIFFImageryProvider {
           this._imagesCache.set(cacheKey, result);
         }
 
+        deferred?.resolve();
         return result;
       } catch (e) {
         console.error('Error during rendering:', e);
+        deferred?.reject(`Error during rendering: ${e}`)
         return undefined;
       }
     } catch (e) {
       console.error(e);
       this.errorEvent.raiseEvent(e);
+      deferred?.reject(`Error during rendering: ${e}`)
       throw e;
     }
   }
