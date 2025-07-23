@@ -677,7 +677,7 @@ export class TIFFImageryProvider {
     }
     if (z < this.minimumLevel || z > this.maximumLevel) return undefined;
 
-    const deferred = defer<void>()
+    const deferred = defer<void>();
     // the request param can fit this form, except that throttle (readonly) is false
     // const fauxRequest = new Request({ 
       // url: this._url,
@@ -697,63 +697,23 @@ export class TIFFImageryProvider {
       // },
       // type: RequestType.IMAGERY
     // });
-    // console.log(`[DEBUG] fauxRequest`, fauxRequest, `param request`, _request)
-    request.url = this._url
-    request.requestFunction = () => deferred.promise
-    request.cancelFunction = () => {console.log(`[DEBUG] cancelled request(${x},${y},${z})`)}
+    request.url = this._url;
+    request.requestFunction = () => deferred.promise;
+    // request.cancelFunction = () => {console.log(`[DEBUG] cancelled request(${x},${y},${z})`)}
+
     // @ts-expect-error private API
-    const scheduled = RequestScheduler.request(request) as Promise<unknown> | undefined
+    const scheduled = RequestScheduler.request(request) as Promise<unknown> | undefined;
 
     if(!scheduled) {
       // RequestScheduler has throttled this request, will try again later
-      console.log(`[DEBUG] throttled request(${x},${y},${z})`)
-      return undefined
+      // console.log(`[DEBUG] throttled request(${x},${y},${z})`)
+      return undefined;
     }
     
     // if we haven't been throttled, go ahead with _requestImage.
     // deferred will handle telling Cesium when we're done, and the 
     // Promise from _requestImage will be returned here by then
-    return this._requestImage(x,y,z,deferred)
-
-    // ========== ATTEMPT GRAVEYARD ===========
-    // return deferred.promise
-      // .then(() => image)
-      // .catch((reason) => {
-        // console.log(`[DEBUG] error with scheduled request(${x},${y},${z})`, reason)
-        // return image
-      // })
-    // if(fauxRequest.state === RequestState.CANCELLED) {
-      // return undefined
-    // }
-    // return scheduled
-      // .then(() => image)
-      // .catch(async (reason) => { 
-        // if(fauxRequest.state === RequestState.CANCELLED) {
-          // // console.log(`[TIFFImageryProvider#requestImage] request(${x},${y},${z}) terminated, awaiting promise manually`)
-          // // await deferred.promise
-          // // await fauxRequest.requestFunction()
-          // console.log(`[TIFFImageryProvider#requestImage] request(${x},${y},${z}) terminated`)
-          // return image
-        // } else {
-          // console.log(`[DEBUG] error with scheduled Request(${x}, ${y}, ${z})`, reason)
-        // }
-        // // Returning a promise to undefined is not what we want.
-        // // We probably need some more checks here.
-        // return image 
-      // })
-
-    // return this._requestImage(x,y,z)
-      // .then((image) => { return image })
-      // .catch((reason) => { 
-        // console.log(`[DEBUG] error with _requestImage(${x}, ${y}, ${z})`, reason)
-        // return undefined 
-      // })
-      // .finally(() => { --requestCount })
-    // try {
-      // return this.actuallyRequestImage(x, y, z);
-    // } finally {
-      // --requestCount;
-    // }
+    return this._requestImage(x, y, z, deferred);
   }
 
   async _requestImage(x: number, y: number, z: number, deferred?: ReturnType<typeof defer<void>>) {
@@ -763,13 +723,13 @@ export class TIFFImageryProvider {
       );
     }
     if (z < this.minimumLevel || z > this.maximumLevel) {
-      deferred?.reject(`Error during rendering: level ${z} beyond bounds [${this.minimumLevel}, ${this.maximumLevel}]`)
+      deferred?.reject(`Error during rendering: level ${z} beyond bounds [${this.minimumLevel}, ${this.maximumLevel}]`);
       return undefined;
     }
 
     const cacheKey = `${x}_${y}_${z}`;
     if (this._imagesCache.has(cacheKey)) {
-      deferred?.resolve()
+      deferred?.resolve();
       return this._imagesCache.get(cacheKey);
     }
 
@@ -779,7 +739,7 @@ export class TIFFImageryProvider {
       const { width, height, data, window } = await this._loadTile(x, y, z);
 
       if (this._destroyed || !width || !height) {
-        deferred?.reject(`Error during rendering: ${this._destroyed ? 'Destroyed' : 'Invalid _loadTile size'}`)
+        deferred?.reject(`Error during rendering: ${this._destroyed ? 'Destroyed' : 'Invalid _loadTile size'}`);
         return undefined;
       }
 
@@ -791,7 +751,7 @@ export class TIFFImageryProvider {
         if (multi || convertToRGB) {
           if (!this._rgbPlot) {
             console.warn('RGB plot not initialized');
-            deferred?.reject(`Error during rendering: RGB plot not initialized`)
+            deferred?.reject(`Error during rendering: RGB plot not initialized`);
             return undefined;
           }
           targetPlot = this._rgbPlot;
@@ -828,7 +788,7 @@ export class TIFFImageryProvider {
             targetPlot.renderDataset(`b${single.band}`, window);
           }
         } else {
-          deferred?.reject(`Error during rendering: unable to determine plot type`)
+          deferred?.reject(`Error during rendering: unable to determine plot type`);
           return undefined;
         }
 
@@ -855,13 +815,13 @@ export class TIFFImageryProvider {
         return result;
       } catch (e) {
         console.error('Error during rendering:', e);
-        deferred?.reject(`Error during rendering: ${e}`)
+        deferred?.reject(`Error during rendering: ${e}`);
         return undefined;
       }
     } catch (e) {
       console.error(e);
       this.errorEvent.raiseEvent(e);
-      deferred?.reject(`Error during rendering: ${e}`)
+      deferred?.reject(`Error during rendering: ${e}`);
       throw e;
     }
   }
